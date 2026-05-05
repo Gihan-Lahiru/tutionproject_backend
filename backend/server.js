@@ -86,11 +86,34 @@ app.use((req, res) => {
   res.status(404).json({ message: 'Route not found' })
 })
 
-const PORT = process.env.PORT || 5000
+const preferredPort = Number(process.env.PORT) || 5000
+const ports = [preferredPort]
 
-app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`)
-  console.log(`📚 Environment: ${process.env.NODE_ENV}`)
+if (!ports.includes(5001)) {
+  ports.push(5001)
+}
+
+const servers = []
+
+ports.forEach((port) => {
+  const server = app.listen(port)
+
+  server.on('listening', () => {
+    console.log(`🚀 Server running on port ${port}`)
+    console.log(`📚 Environment: ${process.env.NODE_ENV}`)
+  })
+
+  server.on('error', (error) => {
+    if (error.code === 'EADDRINUSE') {
+      console.warn(`⚠️ Port ${port} is already in use, skipping it`)
+      return
+    }
+
+    console.error(`Failed to start server on port ${port}`, error)
+    process.exitCode = 1
+  })
+
+  servers.push(server)
 })
 
 module.exports = app

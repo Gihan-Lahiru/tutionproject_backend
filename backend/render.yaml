@@ -13,33 +13,7 @@ services:
         value: production
       - key: PORT
         value: 5000
-      - key: DB_HOST
-        fromDatabase:
-          name: tuition-sir-db
-          property: host
-      - key: DB_PORT
-        fromDatabase:
-          name: tuition-sir-db
-          property: port
-      - key: DB_NAME
-        fromDatabase:
-          name: tuition-sir-db
-          property: database
-      - key: DB_USER
-        fromDatabase:
-          name: tuition-sir-db
-          property: user
-      - key: DB_PASSWORD
-        fromDatabase:
-          name: tuition-sir-db
-          property: password
       - key: JWT_SECRET
         generateValue: true
       - key: JWT_EXPIRES_IN
         value: 7d
-
-databases:
-  - name: tuition-sir-db
-    plan: free
-    databaseName: tuition_sir_db
-    user: tuition_sir_user
