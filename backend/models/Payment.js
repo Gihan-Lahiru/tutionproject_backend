@@ -174,7 +174,81 @@ class Payment {
       );
     });
   }
+
+  // Receipt upload methods
+  static async updateReceipt(id, receipt_url, receipt_public_id) {
+    return new Promise((resolve, reject) => {
+      db.db.run(
+        `UPDATE payments 
+         SET receipt_url = ?, receipt_public_id = ?, receipt_uploaded_at = CURRENT_TIMESTAMP, approval_status = 'pending'
+         WHERE id = ?`,
+        [receipt_url, receipt_public_id, id],
+        function(err) {
+          if (err) reject(err);
+          else resolve({ id, changes: this.changes });
+        }
+      );
+    });
+  }
+
+  static async approveReceipt(id, teacher_id, notes = '') {
+    return new Promise((resolve, reject) => {
+      db.db.run(
+        `UPDATE payments 
+         SET approval_status = 'approved', approved_by = ?, approval_notes = ?, status = 'completed'
+         WHERE id = ?`,
+        [teacher_id, notes, id],
+        function(err) {
+          if (err) reject(err);
+          else {
+            db.db.get('SELECT * FROM payments WHERE id = ?', [id], (err, row) => {
+              if (err) reject(err);
+              else resolve(row);
+            });
+          }
+        }
+      );
+    });
+  }
+
+  static async rejectReceipt(id, teacher_id, notes = '') {
+    return new Promise((resolve, reject) => {
+      db.db.run(
+        `UPDATE payments 
+         SET approval_status = 'rejected', approved_by = ?, approval_notes = ?
+         WHERE id = ?`,
+        [teacher_id, notes, id],
+        function(err) {
+          if (err) reject(err);
+          else {
+            db.db.get('SELECT * FROM payments WHERE id = ?', [id], (err, row) => {
+              if (err) reject(err);
+              else resolve(row);
+            });
+          }
+        }
+      );
+    });
+  }
+
+  static async getPendingReceiptPayments() {
+    return new Promise((resolve, reject) => {
+      db.db.all(
+        `SELECT p.*, u.name as payer_name, u.email as payer_email, u.grade
+         FROM payments p
+         LEFT JOIN users u ON u.id = COALESCE(p.student_id, p.user_id, p.payer_id)
+         WHERE p.receipt_url IS NOT NULL AND LOWER(COALESCE(p.approval_status, 'pending')) = 'pending'
+         ORDER BY datetime(COALESCE(p.receipt_uploaded_at, p.date)) DESC`,
+        [],
+        (err, rows) => {
+          if (err) reject(err)
+          else resolve(rows || [])
+        }
+      )
+    })
+  }
 }
 
 module.exports = Payment
+
 

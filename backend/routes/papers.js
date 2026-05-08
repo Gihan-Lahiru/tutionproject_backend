@@ -18,9 +18,10 @@ router.use(authMiddleware);
 
 // Download paper with watermark (students)
 router.get('/:id/download', roleMiddleware('student'), async (req, res) => {
+  let paper
   try {
     const paperId = req.params.id;
-    const paper = await Paper.findById(paperId);
+    paper = await Paper.findById(paperId);
     
     if (!paper) {
       return res.status(404).json({ message: 'Paper not found' });
@@ -41,15 +42,19 @@ router.get('/:id/download', roleMiddleware('student'), async (req, res) => {
   } catch (error) {
     console.error('Download watermarked paper error:', error);
     console.error('Error details:', error?.message);
-    console.error('Paper URL:', paper?.file_url);
+    try { console.error('Paper URL:', paper?.file_url); } catch (e) {}
 
-    const msg = String(error?.message || '')
+    const msg = String(error?.message || '').toLowerCase()
     const looksLikeNotPdf =
-      msg.toLowerCase().includes('pdf') ||
-      msg.toLowerCase().includes('no pdf') ||
-      msg.toLowerCase().includes('invalid')
+      msg.includes('pdf') ||
+      msg.includes('no pdf') ||
+      msg.includes('invalid')
 
-    if (looksLikeNotPdf || msg.toLowerCase().includes('failed to download file')) {
+    if (msg.includes('encrypted')) {
+      return res.status(400).json({ message: 'This PDF is encrypted and cannot be watermarked.' })
+    }
+
+    if (looksLikeNotPdf || msg.includes('failed to download file')) {
       return res.status(400).json({ message: 'This file cannot be watermarked (not a valid PDF).' })
     }
 
@@ -247,7 +252,7 @@ router.get('/:id/file', async (req, res) => {
       return res.status(404).json({ message: 'Paper not found' });
     }
 
-    // Extract file extension from Cloudinary URL
+    // Extract file extension from Cloudinary URL (best effort)
     const urlParts = paper.file_url.split('/');
     const fileName = urlParts[urlParts.length - 1];
     const fileExt = fileName.includes('.') ? fileName.split('.').pop().split('?')[0] : 'pdf';
@@ -256,9 +261,20 @@ router.get('/:id/file', async (req, res) => {
     let safeTitle = paper.title.replace(/[^a-zA-Z0-9._-\s]/g, '_').replace(/\s+/g, '_');
     // Remove any existing extension from title
     safeTitle = safeTitle.replace(/\.(pdf|docx?|xlsx?|pptx?|txt|png|jpe?g)$/i, '');
-    const downloadName = `${safeTitle}.${fileExt}`;
+    let preferredExt = String(fileExt || '').toLowerCase() || 'pdf'
+
+    // When Cloudinary returns generic octet-stream, use metadata format as a better hint.
+    try {
+      if (paper.file_public_id) {
+        const resource = await cloudinary.api.resource(paper.file_public_id, { resource_type: 'raw' })
+        const metaExt = String(resource?.format || '').trim().toLowerCase()
+        if (metaExt) preferredExt = metaExt
+      }
+    } catch (metaErr) {
+      console.warn('Could not fetch Cloudinary metadata for file extension:', metaErr?.message)
+    }
     
-    // Determine proper MIME type
+    // Determine proper MIME type (fallback when upstream does not provide one)
     const mimeTypes = {
       'pdf': 'application/pdf',
       'doc': 'application/msword',
@@ -272,14 +288,33 @@ router.get('/:id/file', async (req, res) => {
       'jpg': 'image/jpeg',
       'jpeg': 'image/jpeg'
     };
-    const contentType = mimeTypes[fileExt.toLowerCase()] || 'application/octet-stream';
-    
-    // Set proper headers for download
-    res.setHeader('Content-Disposition', `attachment; filename="${downloadName}"`);
-    res.setHeader('Content-Type', contentType);
-    
+    const extByMime = {
+      'application/pdf': 'pdf',
+      'application/msword': 'doc',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx',
+      'application/vnd.ms-excel': 'xls',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx',
+      'application/vnd.ms-powerpoint': 'ppt',
+      'application/vnd.openxmlformats-officedocument.presentationml.presentation': 'pptx',
+      'text/plain': 'txt',
+      'image/png': 'png',
+      'image/jpeg': 'jpg'
+    };
+
     // Fetch file from Cloudinary and pipe to response
     https.get(paper.file_url, (cloudinaryRes) => {
+      const upstreamType = String(cloudinaryRes.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+      const upstreamLooksGeneric = !upstreamType || upstreamType === 'application/octet-stream'
+      const resolvedType = upstreamLooksGeneric
+        ? (mimeTypes[preferredExt] || upstreamType || 'application/octet-stream')
+        : upstreamType;
+      const resolvedExt = extByMime[resolvedType] || preferredExt || fileExt;
+      const resolvedName = `${safeTitle}.${resolvedExt}`;
+
+      // Set headers after detecting upstream MIME to avoid wrong .pdf extension
+      res.setHeader('Content-Disposition', `attachment; filename="${resolvedName}"`);
+      res.setHeader('Content-Type', resolvedType);
+
       cloudinaryRes.pipe(res);
     }).on('error', (error) => {
       console.error('Error fetching file from Cloudinary:', error);

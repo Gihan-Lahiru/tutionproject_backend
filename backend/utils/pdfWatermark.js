@@ -126,7 +126,18 @@ async function addWatermarkToPdf(pdfSource, studentInfo = {}) {
     }
 
     // Load PDF and draw only the logged-in student watermark text.
-    const pdfDoc = await PDFDocument.load(pdfBuffer)
+    let pdfDoc
+    try {
+      pdfDoc = await PDFDocument.load(pdfBuffer)
+    } catch (loadErr) {
+      const msg = String(loadErr?.message || '').toLowerCase()
+      if (msg.includes('encrypted')) {
+        // Retry loading encrypted PDFs by ignoring encryption (pdf-lib suggestion)
+        pdfDoc = await PDFDocument.load(pdfBuffer, { ignoreEncryption: true })
+      } else {
+        throw loadErr
+      }
+    }
     const pages = pdfDoc.getPages()
     const font = await pdfDoc.embedFont(StandardFonts.Helvetica)
     const topFontSize = 11

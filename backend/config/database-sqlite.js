@@ -6,7 +6,7 @@ const db = new sqlite3.Database(dbPath, (err) => {
   if (err) {
     console.error('❌ Database connection error:', err)
   } else {
-    console.log('✅ Database connected (SQLite)')
+    console.log('✅ Database connected (SQLite - Local Development)')
   }
 })
 
@@ -265,11 +265,7 @@ const query = (sql, params = []) => {
 module.exports = {
   query,
   db,
-}
-
-// ==================== PRODUCTION MODE ====================
-// In production, switch to MySQL (Hostinger)
-if (process.env.NODE_ENV === 'production') {
-  console.log('🔄 Switching to MySQL (Production Mode - Hostinger)')
-  module.exports = require('./database-mysql')
+  runAsync,
+  allAsync,
+  ensureColumnAsync,
 }

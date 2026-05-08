@@ -2,6 +2,9 @@ const Payment = require('../models/Payment')
 const crypto = require('crypto')
 const Notification = require('../models/Notification')
 const db = require('../config/database')
+const cloudinary = require('cloudinary').v2
+const fs = require('fs')
+const path = require('path')
 
 class PaymentController {
   static async getMyPayments(req, res) {
@@ -34,21 +37,27 @@ class PaymentController {
 
   static async initPayment(req, res) {
     try {
-      const { class_id, amount } = req.body
+      const { class_id, amount, gateway = 'manual' } = req.body
       const payer_id = req.user.id
 
-      // Create payment record
+      // Create payment record. For manual gateway we still create a pending record.
       const payment = await Payment.create({
         payer_id,
         class_id,
         amount,
         currency: 'LKR',
-        gateway: 'payhere',
-        gateway_payment_id: crypto.randomUUID(),
+        gateway: gateway === 'payhere' ? 'payhere' : 'manual',
+        gateway_payment_id: gateway === 'payhere' ? crypto.randomUUID() : null,
         status: 'pending',
       })
 
-      // Generate PayHere payment URL/data
+      // If client requested manual flow, return minimal response instructing
+      // frontend to upload a receipt. Keep backward compatibility for payhere.
+      if (gateway !== 'payhere') {
+        return res.json({ success: true, payment_id: payment.id, message: 'Manual payment created. Upload receipt to complete.' })
+      }
+
+      // --- PayHere flow (kept for compatibility) ---
       const paymentData = {
         merchant_id: process.env.PAYHERE_MERCHANT_ID,
         return_url: `${process.env.FRONTEND_URL}/student/payments`,
@@ -280,6 +289,246 @@ class PaymentController {
     } catch (error) {
       console.error('Request reactivation error:', error)
       return res.status(500).json({ message: 'Failed to send reactivation request' })
+    }
+  }
+
+  // Receipt upload for manual payment
+  static async uploadReceipt(req, res) {
+    try {
+      if (!req.file) {
+        return res.status(400).json({ message: 'Receipt file is required' })
+      }
+
+      const paymentId = req.params.id
+      const userId = req.user.id
+
+      console.log(`[uploadReceipt] Starting upload for payment ${paymentId}, user ${userId}`)
+      console.log(`[uploadReceipt] File info:`, { path: req.file.path, size: req.file.size, mimetype: req.file.mimetype, originalname: req.file.originalname })
+
+      // Get payment and verify it belongs to user
+      const payment = await Payment.findById(paymentId)
+      console.log(`[uploadReceipt] Payment found:`, payment)
+      
+      if (!payment) {
+        return res.status(404).json({ message: 'Payment not found' })
+      }
+
+      const payerId = payment.student_id || payment.user_id || payment.payer_id
+      console.log(`[uploadReceipt] Payer ID: ${payerId}, User ID: ${userId}`)
+      
+      if (payerId !== userId) {
+        return res.status(403).json({ message: 'Not authorized to upload receipt for this payment' })
+      }
+
+      // Get file extension from original filename
+      const ext = path.extname(req.file.originalname) || '';
+      console.log(`[uploadReceipt] File extension: ${ext}`)
+
+      // Try Cloudinary if configured, otherwise use local storage
+      let receipt_url = ''
+      let receipt_public_id = `receipt-local-${paymentId}-${Date.now()}${ext}`
+
+      if (process.env.CLOUDINARY_CLOUD_NAME && process.env.CLOUDINARY_API_KEY) {
+        console.log(`[uploadReceipt] Uploading file to Cloudinary: ${req.file.originalname}`)
+        
+        // Read file from disk (multer stored it there)
+        const fileBuffer = fs.readFileSync(req.file.path)
+        
+        // Use public_id WITH extension for Cloudinary
+        const cloudinaryPublicId = `receipt-${paymentId}-${Date.now()}${ext}`
+        
+        const result = await new Promise((resolve, reject) => {
+          const stream = cloudinary.uploader.upload_stream(
+            {
+              folder: 'tuition-app/receipts',
+              resource_type: 'raw',
+              public_id: cloudinaryPublicId,
+            },
+            (error, result) => {
+              if (error) {
+                console.error('[uploadReceipt] Cloudinary error:', error)
+                reject(error)
+              }
+              else {
+                console.log('[uploadReceipt] Cloudinary success:', result.public_id)
+                resolve(result)
+              }
+            }
+          )
+          stream.end(fileBuffer)
+        })
+        receipt_url = result.secure_url
+        receipt_public_id = result.public_id
+        
+        // Clean up temp file
+        try {
+          fs.unlinkSync(req.file.path)
+        } catch (e) {
+          console.warn('Failed to delete temp file:', e.message)
+        }
+      } else {
+        // Fallback: use local storage with proper extension
+        console.log(`[uploadReceipt] Cloudinary not configured, using local file storage`)
+        
+        const filenameWithExt = path.basename(req.file.path) + ext;
+        const newFilePath = path.join(path.dirname(req.file.path), filenameWithExt);
+        
+        // Rename file to include extension
+        try {
+          fs.renameSync(req.file.path, newFilePath);
+          console.log(`[uploadReceipt] File renamed with extension: ${filenameWithExt}`);
+        } catch (e) {
+          console.warn('Failed to rename file:', e.message);
+        }
+        
+        receipt_url = `/uploads/${filenameWithExt}`;
+      }
+
+      console.log(`[uploadReceipt] Updating payment with receipt URL: ${receipt_url}`)
+      // Update payment with receipt URL
+      await Payment.updateReceipt(
+        paymentId,
+        receipt_url,
+        receipt_public_id
+      )
+
+      // Notify all teachers that a receipt is pending approval
+      console.log(`[uploadReceipt] Notifying teachers about pending receipt`)
+      const studentName = payment.payer_name || 'A student'
+      const monthYear = `${payment.month} ${payment.year}`
+      const amount = Number(payment.amount || 0).toLocaleString('en-US', { style: 'currency', currency: 'LKR' }).replace('LKR', 'Rs')
+      
+      const teachersRes = await db.query(
+        "SELECT id FROM users WHERE role IN ('teacher','admin')",
+        []
+      )
+
+      for (const row of teachersRes.rows || []) {
+        await Notification.create({
+          user_id: row.id,
+          type: 'receipt_pending_approval',
+          message: `${studentName} uploaded a payment receipt for ${monthYear} (${amount}). Pending your review and approval.`,
+          related_payment_id: paymentId,
+        })
+      }
+
+      console.log(`[uploadReceipt] Receipt upload complete`)
+      res.json({
+        message: 'Receipt uploaded successfully',
+        receipt_url: receipt_url,
+        receipt_public_id: receipt_public_id,
+      })
+    } catch (error) {
+      console.error('[uploadReceipt] Error:', error.message, error.stack)
+      // Clean up temp file on error
+      if (req.file && req.file.path) {
+        try {
+          fs.unlinkSync(req.file.path)
+        } catch (e) {
+          console.warn('Failed to delete temp file on error:', e.message)
+        }
+      }
+      res.status(500).json({ message: 'Failed to upload receipt: ' + error.message })
+    }
+  }
+
+  // Get pending receipt payments for teacher
+  static async getPendingReceipts(req, res) {
+    try {
+      if (req.user.role !== 'teacher' && req.user.role !== 'admin') {
+        return res.status(403).json({ message: 'Not authorized' })
+      }
+
+      const payments = await Payment.getPendingReceiptPayments()
+      res.json({ payments })
+    } catch (error) {
+      console.error('Get pending receipts error:', error)
+      res.status(500).json({ message: 'Failed to fetch pending receipts' })
+    }
+  }
+
+  // Approve receipt and complete payment
+  static async approveReceipt(req, res) {
+    try {
+      if (req.user.role !== 'teacher' && req.user.role !== 'admin') {
+        return res.status(403).json({ message: 'Not authorized' })
+      }
+
+      const paymentId = req.params.id
+      const { notes } = req.body
+
+      const payment = await Payment.findById(paymentId)
+      if (!payment) {
+        return res.status(404).json({ message: 'Payment not found' })
+      }
+
+      if (!payment.receipt_url) {
+        return res.status(400).json({ message: 'No receipt found for this payment' })
+      }
+
+      const updatedPayment = await Payment.approveReceipt(paymentId, req.user.id, notes || '')
+
+      // Notify student
+      const payerId = payment.student_id || payment.user_id || payment.payer_id
+      await Notification.create({
+        user_id: payerId,
+        type: 'payment_approved',
+        message: `Your payment receipt for ${payment.month} ${payment.year} has been approved. Amount: Rs. ${Number(payment.amount).toLocaleString()}`,
+        related_payment_id: paymentId,
+      })
+
+      res.json({
+        message: 'Receipt approved and payment completed',
+        payment: updatedPayment,
+      })
+    } catch (error) {
+      console.error('Approve receipt error:', error)
+      res.status(500).json({ message: 'Failed to approve receipt' })
+    }
+  }
+
+  // Reject receipt
+  static async rejectReceipt(req, res) {
+    try {
+      if (req.user.role !== 'teacher' && req.user.role !== 'admin') {
+        return res.status(403).json({ message: 'Not authorized' })
+      }
+
+      const paymentId = req.params.id
+      const { notes } = req.body
+
+      const payment = await Payment.findById(paymentId)
+      if (!payment) {
+        return res.status(404).json({ message: 'Payment not found' })
+      }
+
+      if (!payment.receipt_url) {
+        return res.status(400).json({ message: 'No receipt found for this payment' })
+      }
+
+      // Reject receipt and clear it for retry, set status back to pending
+      const updatedPayment = await Payment.rejectReceipt(paymentId, req.user.id, notes || '')
+      
+      // Set payment status back to pending so student can retry
+      await Payment.updateStatus(paymentId, 'pending')
+
+      // Notify student
+      const payerId = payment.student_id || payment.user_id || payment.payer_id
+      const notesText = notes ? ` Reason: ${notes}` : ''
+      await Notification.create({
+        user_id: payerId,
+        type: 'payment_rejected',
+        message: `Your payment receipt for ${payment.month} ${payment.year} was rejected.${notesText} Please upload a new receipt to retry.`,
+        related_payment_id: paymentId,
+      })
+
+      res.json({
+        message: 'Receipt rejected. Student can now retry with a new receipt.',
+        payment: updatedPayment,
+      })
+    } catch (error) {
+      console.error('Reject receipt error:', error)
+      res.status(500).json({ message: 'Failed to reject receipt' })
     }
   }
 }

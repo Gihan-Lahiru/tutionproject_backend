@@ -15,6 +15,7 @@ const userRoutes = require('./routes/users')
 const paperRoutes = require('./routes/papers')
 const notificationRoutes = require('./routes/notifications')
 const statsRoutes = require('./routes/stats')
+const adminRoutes = require('./routes/admin')
 
 const app = express()
 
@@ -66,6 +67,7 @@ app.use('/api/users', userRoutes)
 app.use('/api/papers', paperRoutes)
 app.use('/api/notifications', notificationRoutes)
 app.use('/api/stats', statsRoutes)
+app.use('/api/admin', adminRoutes)
 
 // Health check
 app.get('/api/health', (req, res) => {

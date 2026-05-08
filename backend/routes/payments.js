@@ -1,23 +1,15 @@
 const express = require('express')
 const router = express.Router()
 const PaymentController = require('../controllers/paymentController')
-const PayHereController = require('../controllers/payhereController')
 const authMiddleware = require('../middleware/auth')
+const upload = require('../middleware/upload')
 
 // Webhook for payment gateway (no auth required)
 router.post('/verify', PaymentController.verifyPayment)
-router.post('/payhere/notify', PayHereController.handleNotify)
-// PayHere browser redirects (no auth required)
-router.get('/payhere/return', PayHereController.handleReturn)
-router.get('/payhere/cancel', PayHereController.handleCancel)
+// Note: PayHere integration has been removed. Using manual receipt-based payments instead.
 
 // All other routes require authentication
 router.use(authMiddleware)
-
-// PayHere integration
-router.post('/payhere/initiate', PayHereController.initiatePayment)
-router.post('/payhere/confirm', PayHereController.confirmPayment)
-router.get('/payhere/status/:orderId', PayHereController.getPaymentStatus)
 
 // Get current user's payments (for students)
 router.get('/my-payments', PaymentController.getMyPayments)
@@ -35,5 +27,11 @@ router.get('/stats', PaymentController.getStats)
 // Teacher/admin: list all payments
 router.get('/all', PaymentController.getAllPayments)
 router.post('/remind', PaymentController.sendReminder)
+
+// Receipt management (students can upload, teachers can approve/reject)
+router.post('/:id/receipt', upload.single('receipt'), PaymentController.uploadReceipt)
+router.get('/receipts/pending', PaymentController.getPendingReceipts)
+router.post('/:id/receipt/approve', PaymentController.approveReceipt)
+router.post('/:id/receipt/reject', PaymentController.rejectReceipt)
 
 module.exports = router
